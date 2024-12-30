@@ -1,0 +1,134 @@
+// package for insertion in each of the tables
+
+create or replace package value_insert as
+	procedure patient_insert (id in int, name in varchar, meld_score in real, alcoholism_degree in int, dob in date, hospital_id in int);
+	procedure hospital_insert (h_id in int, name in varchar, lat in real, lon in real, doc_avail in int, beds_avail in int);
+	procedure liver_insert (liv_id in int, hos_id in int, age in int, dis in real);
+end value_insert;
+/
+
+
+create or replace package body value_insert as
+	procedure patient_insert(id in int, name in varchar, meld_score in real, alcoholism_degree in int, dob in date, hospital_id in int) is
+begin
+	insert into patients values (id, name, meld_score, alcoholism_degree, dob, hospital_id);
+end;
+	procedure hospital_insert(h_id in int, name in varchar, lat in real, lon in real, doc_avail in int, beds_avail in int) is
+begin
+	insert into hospitals values(h_id, name, lat, lon, doc_avail, beds_avail);
+end;
+	procedure liver_insert(liv_id in int, hos_id in int, age in int, dis in real) is
+begin
+	insert into liver values(liv_id, hos_id, age, dis);
+end;
+end value_insert;
+/
+
+
+// checks if liver can be transported before it expires
+
+create or replace function liver_transport_check(liv_id in int, hos_id int) return int as
+liv_hos hospitals%rowtype;
+liv liver%rowtype;
+hos hospitals%rowtype;
+x real;
+y real;
+d real;
+begin
+	select * into liv from liver where liver_id = liv_id;
+	select * into liv_hos from hospitals where hospital_id = liv.hospital_id;
+	select * into hos from hospitals where hospital_id = hos_id;
+	x := hos.latitude - liv_hos.latitude;
+	y := hos.longitude - liv_hos.longitude;
+	x := x * x;
+	y := y * y;
+	d := sqrt(x + y);
+	if d <= liv.life_distance then
+		return 1;
+	else
+		return 0;
+	end if;
+end;
+/
+
+// table to store hospital beds and doctors to track the order of transplants
+
+create table store_beds_docs(
+hospital_id int,
+beds int,
+docs int,
+foreign key (hospital_id) references hospitals(hospital_id));
+
+create or replace trigger track
+after insert
+on hospitals
+for each row
+begin
+	insert into store_beds_docs values( :new.hospital_id, :new.beds_available, :new.doctors_available);
+end;
+/
+
+create or replace procedure update_hospitals(hos_id in int) as
+cursor c(hos_id int) is select beds, docs from store_beds_docs where hospital_id = hos_id;
+bed int;
+doc int;
+begin
+	open c(hos_id);
+		fetch c into bed, doc;
+		update hospitals
+		set beds_available = bed
+		where hospital_id = hos_id;
+		update hospitals
+		set doctors_available = doc
+		where hospital_id = hos_id;
+	close c;
+end;
+/
+
+// does the matching of livers with the patients
+
+create or replace procedure liver_transplant as 
+cursor liver is select liver_id, liver_age from liver order by life_distance asc;
+cursor patient is select patient_id, dob, hospital_id from patients order by meld_score desc, alcoholism_degree asc;
+flag int;
+cursor hos is select hospital_id from hospitals;
+begin
+	for r in liver loop
+		flag := 1;
+		for x in patient loop
+			if to_date(sysdate(), 'yy') - to_date(x.dob, 'yy') >= r.liver_age then
+				if liver_transport_check(r.liver_id, x.hospital_id) = 1 then
+					flag := 0;
+					delete from patients
+					where patient_id = x.patient_id;
+					delete from liver
+					where liver_id = r.liver_id;
+					exit;
+				end if;
+			end if;
+		end loop;
+		if flag = 1 then
+			dbms_output.put_line('no patient matched for this liver');
+		end if;
+	end loop;
+	for r in hos loop
+		update_hospitals(r.hospital_id);
+	end loop;
+end;
+/
+
+
+// trigger for updating doctors and beds in a hospital where liver matches with the patient
+
+create or replace trigger matched_and_update
+after delete on patients
+for each row
+begin
+	update hospitals
+	set doctors_available = doctors_available - 1
+	where hospital_id = :old.hospital_id;
+	update hospitals
+	set beds_available = beds_available - 1
+	where hospital_id = :old.hospital_id;
+end;
+/
