@@ -1,134 +1,184 @@
-// package for insertion in each of the tables
+-- Package Declaration
+CREATE OR REPLACE PACKAGE value_insert AS
+  PROCEDURE patient_insert (
+    id INT,
+    name VARCHAR,
+    meld_score REAL,
+    alcoholism_degree INT,
+    dob DATE,
+    hospital_id INT
+  );
 
-create or replace package value_insert as
-	procedure patient_insert (id in int, name in varchar, meld_score in real, alcoholism_degree in int, dob in date, hospital_id in int);
-	procedure hospital_insert (h_id in int, name in varchar, lat in real, lon in real, doc_avail in int, beds_avail in int);
-	procedure liver_insert (liv_id in int, hos_id in int, age in int, dis in real);
-end value_insert;
+  PROCEDURE hospital_insert (
+    h_id INT,
+    name VARCHAR,
+    lat REAL,
+    lon REAL,
+    doc_avail INT,
+    beds_avail INT
+  );
+
+  PROCEDURE liver_insert (
+    liv_id INT,
+    hos_id INT,
+    age INT,
+    dis REAL
+  );
+END value_insert;
 /
 
+-- Package Body
+CREATE OR REPLACE PACKAGE BODY value_insert AS
+  PROCEDURE patient_insert (
+    id INT,
+    name VARCHAR,
+    meld_score REAL,
+    alcoholism_degree INT,
+    dob DATE,
+    hospital_id INT
+  ) IS
+  BEGIN
+    INSERT INTO patients(patient_id, name, meld_score, alcoholism_degree, dob, hospital_id)
+    VALUES (id, name, meld_score, alcoholism_degree, dob, hospital_id);
+  END;
 
-create or replace package body value_insert as
-	procedure patient_insert(id in int, name in varchar, meld_score in real, alcoholism_degree in int, dob in date, hospital_id in int) is
-begin
-	insert into patients values (id, name, meld_score, alcoholism_degree, dob, hospital_id);
-end;
-	procedure hospital_insert(h_id in int, name in varchar, lat in real, lon in real, doc_avail in int, beds_avail in int) is
-begin
-	insert into hospitals values(h_id, name, lat, lon, doc_avail, beds_avail);
-end;
-	procedure liver_insert(liv_id in int, hos_id in int, age in int, dis in real) is
-begin
-	insert into liver values(liv_id, hos_id, age, dis);
-end;
-end value_insert;
+  PROCEDURE hospital_insert (
+    h_id INT,
+    name VARCHAR,
+    lat REAL,
+    lon REAL,
+    doc_avail INT,
+    beds_avail INT
+  ) IS
+  BEGIN
+    INSERT INTO hospitals(hospital_id, name, latitude, longitude, doctors_available, beds_available)
+    VALUES (h_id, name, lat, lon, doc_avail, beds_avail);
+  END;
+
+  PROCEDURE liver_insert (
+    liv_id INT,
+    hos_id INT,
+    age INT,
+    dis REAL
+  ) IS
+  BEGIN
+    INSERT INTO liver(liver_id, hospital_id, liver_age, life_distance)
+    VALUES (liv_id, hos_id, age, dis);
+  END;
+END value_insert;
 /
 
+-- Function to Check if Liver Can Be Transported
+CREATE OR REPLACE FUNCTION liver_transport_check (
+  liv_id INT,
+  hos_id INT
+) RETURN INT AS
+  liv_hos hospitals%ROWTYPE;
+  liv liver%ROWTYPE;
+  hos hospitals%ROWTYPE;
+  x REAL;
+  y REAL;
+  d REAL;
+BEGIN
+  SELECT * INTO liv FROM liver WHERE liver_id = liv_id;
+  SELECT * INTO liv_hos FROM hospitals WHERE hospital_id = liv.hospital_id;
+  SELECT * INTO hos FROM hospitals WHERE hospital_id = hos_id;
 
-// checks if liver can be transported before it expires
+  x := hos.latitude - liv_hos.latitude;
+  y := hos.longitude - liv_hos.longitude;
+  d := SQRT(x * x + y * y);
 
-create or replace function liver_transport_check(liv_id in int, hos_id int) return int as
-liv_hos hospitals%rowtype;
-liv liver%rowtype;
-hos hospitals%rowtype;
-x real;
-y real;
-d real;
-begin
-	select * into liv from liver where liver_id = liv_id;
-	select * into liv_hos from hospitals where hospital_id = liv.hospital_id;
-	select * into hos from hospitals where hospital_id = hos_id;
-	x := hos.latitude - liv_hos.latitude;
-	y := hos.longitude - liv_hos.longitude;
-	x := x * x;
-	y := y * y;
-	d := sqrt(x + y);
-	if d <= liv.life_distance then
-		return 1;
-	else
-		return 0;
-	end if;
-end;
+  IF d <= liv.life_distance THEN
+    RETURN 1;
+  ELSE
+    RETURN 0;
+  END IF;
+END;
 /
 
-// table to store hospital beds and doctors to track the order of transplants
+-- Table to Store Hospital Beds and Doctors
+CREATE TABLE store_beds_docs (
+  hospital_id INT,
+  beds INT,
+  docs INT,
+  FOREIGN KEY (hospital_id) REFERENCES hospitals(hospital_id)
+);
 
-create table store_beds_docs(
-hospital_id int,
-beds int,
-docs int,
-foreign key (hospital_id) references hospitals(hospital_id));
-
-create or replace trigger track
-after insert
-on hospitals
-for each row
-begin
-	insert into store_beds_docs values( :new.hospital_id, :new.beds_available, :new.doctors_available);
-end;
+-- Trigger to Track Initial Bed and Doctor Counts
+CREATE OR REPLACE TRIGGER track
+AFTER INSERT ON hospitals
+FOR EACH ROW
+BEGIN
+  INSERT INTO store_beds_docs VALUES (
+    :NEW.hospital_id,
+    :NEW.beds_available,
+    :NEW.doctors_available
+  );
+END;
 /
 
-create or replace procedure update_hospitals(hos_id in int) as
-cursor c(hos_id int) is select beds, docs from store_beds_docs where hospital_id = hos_id;
-bed int;
-doc int;
-begin
-	open c(hos_id);
-		fetch c into bed, doc;
-		update hospitals
-		set beds_available = bed
-		where hospital_id = hos_id;
-		update hospitals
-		set doctors_available = doc
-		where hospital_id = hos_id;
-	close c;
-end;
+-- Procedure to Update Hospital Availability from Backup Table
+CREATE OR REPLACE PROCEDURE update_hospitals(hos_id INT) AS
+  bed INT;
+  doc INT;
+BEGIN
+  SELECT beds, docs INTO bed, doc
+  FROM store_beds_docs
+  WHERE hospital_id = hos_id;
+
+  UPDATE hospitals
+  SET beds_available = bed,
+      doctors_available = doc
+  WHERE hospital_id = hos_id;
+END;
 /
 
-// does the matching of livers with the patients
+-- Procedure for Liver Transplant Matching
+CREATE OR REPLACE PROCEDURE liver_transplant AS
+  CURSOR liver_cur IS
+    SELECT liver_id, liver_age FROM liver ORDER BY life_distance ASC;
 
-create or replace procedure liver_transplant as 
-cursor liver is select liver_id, liver_age from liver order by life_distance asc;
-cursor patient is select patient_id, dob, hospital_id from patients order by meld_score desc, alcoholism_degree asc;
-flag int;
-cursor hos is select hospital_id from hospitals;
-begin
-	for r in liver loop
-		flag := 1;
-		for x in patient loop
-			if to_date(sysdate(), 'yy') - to_date(x.dob, 'yy') >= r.liver_age then
-				if liver_transport_check(r.liver_id, x.hospital_id) = 1 then
-					flag := 0;
-					delete from patients
-					where patient_id = x.patient_id;
-					delete from liver
-					where liver_id = r.liver_id;
-					exit;
-				end if;
-			end if;
-		end loop;
-		if flag = 1 then
-			dbms_output.put_line('no patient matched for this liver');
-		end if;
-	end loop;
-	for r in hos loop
-		update_hospitals(r.hospital_id);
-	end loop;
-end;
+  CURSOR patient_cur IS
+    SELECT patient_id, dob, hospital_id FROM patients
+    ORDER BY meld_score DESC, alcoholism_degree ASC;
+
+  CURSOR hos_cur IS
+    SELECT hospital_id FROM hospitals;
+
+  flag INT;
+BEGIN
+  FOR r IN liver_cur LOOP
+    flag := 1;
+    FOR x IN patient_cur LOOP
+      IF (MONTHS_BETWEEN(SYSDATE, x.dob) / 12) >= r.liver_age THEN
+        IF liver_transport_check(r.liver_id, x.hospital_id) = 1 THEN
+          flag := 0;
+          DELETE FROM patients WHERE patient_id = x.patient_id;
+          DELETE FROM liver WHERE liver_id = r.liver_id;
+          EXIT;
+        END IF;
+      END IF;
+    END LOOP;
+
+    IF flag = 1 THEN
+      DBMS_OUTPUT.PUT_LINE('No patient matched for liver ID ' || r.liver_id);
+    END IF;
+  END LOOP;
+
+  FOR r IN hos_cur LOOP
+    update_hospitals(r.hospital_id);
+  END LOOP;
+END;
 /
 
-
-// trigger for updating doctors and beds in a hospital where liver matches with the patient
-
-create or replace trigger matched_and_update
-after delete on patients
-for each row
-begin
-	update hospitals
-	set doctors_available = doctors_available - 1
-	where hospital_id = :old.hospital_id;
-	update hospitals
-	set beds_available = beds_available - 1
-	where hospital_id = :old.hospital_id;
-end;
+-- Trigger to Decrement Doctors and Beds After a Match
+CREATE OR REPLACE TRIGGER matched_and_update
+AFTER DELETE ON patients
+FOR EACH ROW
+BEGIN
+  UPDATE hospitals
+  SET doctors_available = GREATEST(doctors_available - 1, 0),
+      beds_available = GREATEST(beds_available - 1, 0)
+  WHERE hospital_id = :OLD.hospital_id;
+END;
 /
